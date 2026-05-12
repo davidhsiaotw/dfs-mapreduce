@@ -1,0 +1,166 @@
+syntax = "proto3";
+package messages;
+option go_package = "./messages";
+
+// --- Common Messages ---
+
+message Response {
+    bool ok = 1;
+    string message = 2;
+}
+
+message NodeInfo {
+    string id = 1;
+    string address = 2; // IP:Port
+    uint64 used_space = 3;
+    uint64 free_space = 4;
+    uint64 requests_handled = 5;
+}
+
+message FileInfo {
+    string name = 1;
+    uint64 size = 2;
+}
+
+message ChunkInfo {
+    uint64 id = 1;
+    string file_name = 2;
+    uint32 size = 3;
+    bytes checksum = 4;
+}
+
+message DeleteFileRequest {
+    FileInfo metadata = 1;
+}
+
+// --- Client <-> Controller ---
+
+message PutFileRequest {
+    FileInfo metadata = 1;
+    ChunkInfo chunk = 2;
+    uint64 num_chunks = 3;
+}
+
+message ChunkAllocation {
+    ChunkInfo metadata = 1;
+    repeated NodeInfo nodes= 2;
+}
+
+message PutFileResponse {
+    Response resp = 1;
+    repeated ChunkAllocation allocations = 2;
+}
+
+message GetFileRequest {
+    FileInfo metadata = 1;
+}
+
+message ChunkLocation {
+    ChunkInfo metadata = 1;
+    repeated NodeInfo nodes = 2;
+}
+
+message GetFileResponse {
+    Response resp = 1;
+    FileInfo metadata = 2;
+    repeated ChunkLocation locations = 3;
+}
+
+message ListFilesRequest {}
+
+message ListFilesResponse {
+    Response resp = 1;
+    repeated FileInfo files = 2;
+}
+
+message LeaseRenewRequest {
+    FileInfo metadata = 1;
+}
+
+message NodeInfoRequest {}
+
+message NodeInfoResponse {
+    Response resp = 1;
+    uint64 total_used = 2;
+    uint64 total_free = 3;
+    repeated NodeInfo node_stats = 4;
+}
+
+// --- Storage Node <-> Controller ---
+
+message RegistrationRequest {
+    NodeInfo node = 1;
+}
+
+message Heartbeat {
+    NodeInfo node = 1;
+}
+
+message ChunkStatusReport {
+    ChunkInfo metadata = 1;
+    bool success = 2;
+    NodeInfo node = 3;
+}
+
+//message BlockReport {
+//    NodeInfo node = 1;
+//    repeated ChunkInfo chunks = 2;
+//}
+
+message ReplicaNodesRequest {
+    ChunkInfo chunk = 1;
+    uint32 count = 2;
+}
+
+message ReplicaNodesResponse {
+    Response resp = 1;
+    repeated NodeInfo nodes = 2;
+}
+
+message DispatchReplicaTask {
+    ChunkInfo metadata = 1;
+    uint32 count = 2;
+}
+
+// --- Client/Node <-> Storage Node ---
+
+message StoreChunkRequest {
+    ChunkInfo metadata = 1;
+    bool is_original = 2;
+}
+
+message RetrieveChunkRequest {
+    ChunkInfo metadata = 1;
+}
+
+message RetrieveChunkResponse {
+    Response resp = 1;
+    ChunkInfo metadata = 2;
+}
+
+// --- Wrapper ---
+
+message Wrapper {
+    oneof msg {
+        Response response = 1;
+        DeleteFileRequest delete_file_req = 2;
+        PutFileRequest put_file_req = 3;
+        PutFileResponse put_file_resp = 4;
+        GetFileRequest get_file_req = 5;
+        GetFileResponse get_file_resp = 6;
+        ListFilesRequest list_files_req = 7;
+        ListFilesResponse list_files_resp = 8;
+        LeaseRenewRequest lease_renew_req = 9;
+        NodeInfoRequest stats_req = 10;
+        NodeInfoResponse stats_resp = 11;
+        RegistrationRequest registration_req = 12;
+        Heartbeat heartbeat = 13;
+        ChunkStatusReport chunk_status_report = 14;
+        ReplicaNodesRequest replica_nodes_req = 15;
+        ReplicaNodesResponse replica_nodes_resp = 16;
+        DispatchReplicaTask dispatch_replica_task = 17;
+        StoreChunkRequest store_chunk_req = 18;
+        RetrieveChunkRequest retrieve_chunk_req = 19;
+        RetrieveChunkResponse retrieve_chunk_resp = 20;
+    }
+}
