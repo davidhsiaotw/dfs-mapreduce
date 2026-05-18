@@ -39,6 +39,40 @@ func submitJob(masterAddr string, inputFiles []string, pluginPath string) {
 	}
 
 	fmt.Printf("Job submitted successfully! Job ID: %s\n", resp.JobId)
+	fmt.Println("Waiting for job completion...")
+
+	var currentPhase string
+	for {
+		wrapper, err := handler.Receive()
+		if err != nil {
+			log.Fatalf("\nconnection lost: %v\n", err)
+		}
+		prog := wrapper.GetJobProgress()
+		if prog == nil {
+			continue
+		}
+
+		if prog.IsError {
+			log.Printf("\ntask failed: %s\n", prog.Message)
+		}
+
+		if prog.Phase != currentPhase {
+			if currentPhase != "" {
+				fmt.Println()
+			}
+			currentPhase = prog.Phase
+			if prog.IsComplete {
+				fmt.Printf("✅ %s\n", prog.Message)
+				break
+			} else {
+				fmt.Printf("▶️  Starting %s phase...\n", currentPhase)
+			}
+		}
+
+		if !prog.IsComplete {
+			fmt.Printf("\r   Progress: %d / %d tasks completed\n", prog.CompletedTasks, prog.TotalTasks)
+		}
+	}
 }
 
 func main() {
