@@ -7,6 +7,16 @@ message Response {
     string message = 2;
 }
 
+message JobRequest {
+    repeated string input_files = 1;
+    bytes job_binary = 2; // .so or executable
+}
+
+message JobResponse {
+    Response resp = 1;
+    string job_id = 2;
+}
+
 message WorkerInfo {
     string id = 1;
     string address = 2;
@@ -19,9 +29,16 @@ message Heartbeat {
     WorkerInfo worker = 1;
 }
 
+enum TaskType {
+    MAP = 0;
+    REDUCE = 1;
+}
+
 message MapReduceWrapper {
     oneof msg {
         Response response = 1;
-        Heartbeat heartbeat = 2;
+        JobRequest job_req = 2;
+        JobResponse job_resp = 3;
+        Heartbeat heartbeat = 4;
     }
 }

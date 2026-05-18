@@ -83,6 +83,28 @@ func (m *MessageHandler) SendResponse(ok bool, msg string) error {
 	})
 }
 
+func (m *MessageHandler) SendJobRequest(inputFiles []string, jobBinary []byte) error {
+	return m.Send(&MapReduceWrapper{
+		Msg: &MapReduceWrapper_JobReq{
+			JobReq: &JobRequest{
+				InputFiles:  inputFiles,
+				JobBinary:   jobBinary,
+			},
+		},
+	})
+}
+
+func (m *MessageHandler) SendJobResponse(ok bool, msg, jobId string) error {
+	return m.Send(&MapReduceWrapper{
+		Msg: &MapReduceWrapper_JobResp{
+			JobResp: &JobResponse{
+				Resp:  &Response{Ok: ok, Message: msg},
+				JobId: jobId,
+			},
+		},
+	})
+}
+
 func (m *MessageHandler) SendHeartbeat(id, address string, cpu uint32, mem uint32, active uint32) error {
 	return m.Send(&MapReduceWrapper{
 		Msg: &MapReduceWrapper_Heartbeat{

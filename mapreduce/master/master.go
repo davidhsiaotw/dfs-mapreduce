@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,14 +17,24 @@ type workerStatus struct {
 	lastHeartbeat time.Time
 }
 
+type jobState struct {
+	id          string
+	request     *mr.JobRequest
+	phase       mr.TaskType
+}
+
 type master struct {
 	workers      map[string]*workerStatus
 	workersMutex sync.RWMutex
+
+	jobs      map[string]*jobState
+	jobsMutex sync.RWMutex
 }
 
 func newMaster() *master {
 	return &master{
 		workers:       make(map[string]*workerStatus),
+		jobs:          make(map[string]*jobState),
 	}
 }
 
@@ -53,6 +64,24 @@ func (m *master) monitorWorkers() {
 	}
 }
 
+// handleJobSubmission gets all chunks' metadata (ID, stored locations) for each input file, converts them into a job, and dispatches tasks.
+func (m *master) handleJobSubmission(msgHandler *mr.MessageHandler, req *mr.JobRequest) {
+	jobId := fmt.Sprintf("%d", time.Now().UnixNano())
+	log.Printf("Received job submission: %s, inputs: %v\n", jobId, req.InputFiles)
+
+	job := &jobState{
+		id:          jobId,
+		request:     req,
+		phase:       mr.TaskType_MAP,
+	}
+
+	m.jobsMutex.Lock()
+	m.jobs[jobId] = job
+	m.jobsMutex.Unlock()
+
+	msgHandler.SendJobResponse(true, "Job accepted", jobId)
+}
+
 func (m *master) handleConnection(conn net.Conn) {
 	handler := mr.NewMessageHandler(conn)
 	defer handler.Close()
@@ -69,6 +98,8 @@ func (m *master) handleConnection(conn net.Conn) {
 		switch msg := wrapper.Msg.(type) {
 		case *mr.MapReduceWrapper_Heartbeat:
 			m.handleWorkerHeartbeat(msg.Heartbeat)
+		case *mr.MapReduceWrapper_JobReq:
+			m.handleJobSubmission(handler, msg.JobReq)
 		default:
 			log.Printf("unhandled message type: %T\n", msg)
 		}
