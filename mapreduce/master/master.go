@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dfs/messages"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ type jobState struct {
 	id          string
 	request     *mr.JobRequest
 	phase       mr.TaskType
+	chunkNodes  map[string][][]string // fileName -> chunkId -> node addresses
 }
 
 type master struct {
@@ -29,12 +31,15 @@ type master struct {
 
 	jobs      map[string]*jobState
 	jobsMutex sync.RWMutex
+
+	dfsController string
 }
 
-func newMaster() *master {
+func newMaster(dfsController string) *master {
 	return &master{
 		workers:       make(map[string]*workerStatus),
 		jobs:          make(map[string]*jobState),
+		dfsController: dfsController,
 	}
 }
 
@@ -64,15 +69,64 @@ func (m *master) monitorWorkers() {
 	}
 }
 
+// getChunkInfoFromDFS gets each chunk's ID and stored locations.
+func (m *master) getChunkInfoFromDFS(fileName string) ([][]string, int, error) {
+	conn, err := net.Dial("tcp", m.dfsController)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer conn.Close()
+
+	handler := messages.NewMessageHandler(conn)
+	err = handler.SendGetFileRequest(fileName)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	wrapper, err := handler.Receive()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	resp := wrapper.GetGetFileResp()
+	if resp == nil || !resp.Resp.Ok {
+		return nil, 0, fmt.Errorf("DFS error: %s", resp.GetResp().GetMessage())
+	}
+
+	chunkNodes := make([][]string, len(resp.Locations))
+	for _, loc := range resp.Locations {
+		var addrs []string
+		for _, node := range loc.Nodes {
+			addrs = append(addrs, node.Address)
+		}
+		chunkNodes[loc.Metadata.Id] = addrs
+	}
+
+	return chunkNodes, len(resp.Locations), nil
+}
+
 // handleJobSubmission gets all chunks' metadata (ID, stored locations) for each input file, converts them into a job, and dispatches tasks.
 func (m *master) handleJobSubmission(msgHandler *mr.MessageHandler, req *mr.JobRequest) {
 	jobId := fmt.Sprintf("%d", time.Now().UnixNano())
 	log.Printf("Received job submission: %s, inputs: %v\n", jobId, req.InputFiles)
 
+	chunkNodes := make(map[string][][]string)
+
+	for _, inputFile := range req.InputFiles {
+		fileChunkNodes, _, err := m.getChunkInfoFromDFS(inputFile)
+		if err != nil {
+			log.Printf("Failed to get chunk info for %s: %v\n", inputFile, err)
+			msgHandler.SendJobResponse(false, "Failed to get chunk info from DFS for "+inputFile+": "+err.Error(), "")
+			return
+		}
+		chunkNodes[inputFile] = fileChunkNodes
+	}
+
 	job := &jobState{
 		id:          jobId,
 		request:     req,
 		phase:       mr.TaskType_MAP,
+		chunkNodes:  chunkNodes,
 	}
 
 	m.jobsMutex.Lock()
@@ -107,14 +161,15 @@ func (m *master) handleConnection(conn net.Conn) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Printf("Usage: %s <port>\n", os.Args[0])
+	if len(os.Args) < 3 {
+		fmt.Printf("Usage: %s <port> <dfs_controller_addr>\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	port := os.Args[1]
+	dfsController := os.Args[2]
 
-	m := newMaster()
+	m := newMaster(dfsController)
 	go m.monitorWorkers()
 
 	ln, err := net.Listen("tcp", ":"+port)
