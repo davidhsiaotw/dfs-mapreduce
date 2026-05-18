@@ -87,6 +87,8 @@ func (w *worker) handleTask(msgHandler *mr.MessageHandler, task *mr.TaskAssignme
 	reduceData := make([]uint64, task.NumReducers)
 	if task.Type == mr.TaskType_MAP {
 		reduceData, err = w.runMap(task)
+	} else {
+		err = w.runReduce(task)
 	}
 
 	if err != nil {
@@ -367,6 +369,274 @@ func (w *worker) mergeSpills(taskId string, numSpills int, numReducers uint32, t
 	return reduceData, nil
 }
 
+// handleFetchIntermediate fetches partitioned data from intermediate files based on index files.
+func (w *worker) handleFetchIntermediate(msgHandler *mr.MessageHandler, req *mr.FetchIntermediateRequest) {
+	tmpDir := filepath.Join(basePath, req.JobId)
+
+	idxPath := filepath.Join(tmpDir, fmt.Sprintf(indexFilename, req.TaskId))
+	idxBytes, err := os.ReadFile(idxPath)
+	if err != nil {
+		msgHandler.SendResponse(false, "intermediate data index not found")
+		return
+	}
+
+	msgHandler.SendResponse(true, "sending intermediate data...")
+
+	lines := strings.Split(string(idxBytes), "\n")
+	var pStart, pEnd int64 = 0, 0
+	found := false
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		var rId uint32
+		var start, end int64
+		fmt.Sscanf(line, "%d %d %d", &rId, &start, &end)
+		if rId == req.ReducerId {
+			pStart = start
+			pEnd = end
+			found = true
+			break
+		}
+	}
+
+	if found && pEnd > pStart {
+		interPath := filepath.Join(tmpDir, fmt.Sprintf(intermediateFilename, req.TaskId))
+		fInter, err := os.Open(interPath)
+		if err == nil {
+			section := io.NewSectionReader(fInter, pStart, pEnd-pStart)
+			content, err := io.ReadAll(section)
+			if err == nil {
+				msgHandler.WriteN(content)
+			}
+			fInter.Close()
+		}
+	}
+}
+
+// shuffle applied k-way merge on intermediate files retrieved from other workers, then group values into an array by key.
+func (w *worker) shuffle(task *mr.TaskAssignment, tmpDir string) (string, error) {
+	log.Printf("shuffling intermediate files for task %s (job %s)\n", task.TaskId, task.JobId)
+	hostName, _ := os.Hostname()
+	localNodeName := strings.Split(hostName, ".")[0]
+
+	var fetchedFiles []string
+
+	mapTaskInfo := task.MapTaskInfo
+
+	for id, addr := range mapTaskInfo {
+		if strings.HasPrefix(addr, localNodeName) {
+			log.Printf("locally fetch data from %s on %s for task %s\n", fmt.Sprintf(indexFilename, id), localNodeName, task.TaskId)
+			indexPath := filepath.Join(tmpDir, fmt.Sprintf(indexFilename, id))
+
+			idxBytes, err := os.ReadFile(indexPath)
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(string(idxBytes), "\n")
+			var pStart, pEnd int64 = 0, 0
+			found := false
+			for _, line := range lines {
+				if len(line) == 0 {
+					continue
+				}
+				var rId uint32
+				var start, end int64
+				fmt.Sscanf(line, "%d %d %d", &rId, &start, &end)
+				if rId == task.ReducerId {
+					pStart = start
+					pEnd = end
+					found = true
+					break
+				}
+			}
+
+			if found && pEnd > pStart {
+				fetchedPath := filepath.Join(tmpDir, fmt.Sprintf("fetched-%s-%d", id, task.ReducerId))
+				interPath := filepath.Join(tmpDir, fmt.Sprintf(intermediateFilename, id))
+
+				src, err := os.Open(interPath)
+				if err != nil {
+					continue
+				}
+				dst, err := os.Create(fetchedPath)
+				if err != nil {
+					src.Close()
+					continue
+				}
+
+				section := io.NewSectionReader(src, pStart, pEnd-pStart)
+				io.Copy(dst, section)
+				src.Close()
+				dst.Close()
+				fetchedFiles = append(fetchedFiles, fetchedPath)
+			}
+		} else {
+			log.Printf("remotely fetch data from %s on %s for task %s\n", fmt.Sprintf(indexFilename, id), addr, task.TaskId)
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				log.Printf("Failed to connect to worker %s: %v\n", addr, err)
+				continue
+			}
+
+			msgHandler := mr.NewMessageHandler(conn)
+			err = msgHandler.SendFetchIntermediateRequest(task.JobId, task.ReducerId, id)
+			if err != nil {
+				conn.Close()
+				continue
+			}
+
+			wrapper, err := msgHandler.Receive()
+			if err != nil {
+				conn.Close()
+				continue
+			}
+
+			resp := wrapper.GetResponse()
+			if resp == nil || !resp.Ok {
+				conn.Close()
+				continue
+			}
+
+			fetchedPath := filepath.Join(tmpDir, fmt.Sprintf("fetched-%s-%d", id, task.ReducerId))
+			dst, err := os.Create(fetchedPath)
+			if err != nil {
+				conn.Close()
+				continue
+			}
+
+			_, err = io.Copy(dst, conn)
+			dst.Close()
+			conn.Close()
+
+			if err == nil || err == io.EOF {
+				fetchedFiles = append(fetchedFiles, fetchedPath)
+			}
+		}
+	}
+
+	sortedFile := filepath.Join(tmpDir, fmt.Sprintf("sorted-%d", task.ReducerId))
+	err := util.ExternalSort(fetchedFiles, sortedFile)
+	if err != nil {
+		return "", fmt.Errorf("external sort failed: %v", err)
+	}
+
+	for _, f := range fetchedFiles {
+		os.Remove(f)
+	}
+
+	mergedPath := filepath.Join(tmpDir, fmt.Sprintf("merged-%d", task.ReducerId))
+	mf, err := os.Create(mergedPath)
+	if err != nil {
+		return "", err
+	}
+	mw := bufio.NewWriter(mf)
+
+	sf, err := os.Open(sortedFile)
+	if err != nil {
+		mf.Close()
+		return "", err
+	}
+
+	scanner := util.NewKVScanner(sf)
+	var currentKey []byte
+	var values [][]byte
+
+	for scanner.Next() {
+		kv := scanner.Current
+		if !bytes.Equal(kv.Key, currentKey) && currentKey != nil {
+			mw.Write(currentKey)
+			mw.WriteByte('\t')
+			for i, v := range values {
+				mw.Write(v)
+				if i < len(values)-1 {
+					mw.WriteByte(',')
+				}
+			}
+			mw.WriteByte('\n')
+			values = nil
+		}
+		currentKey = make([]byte, len(kv.Key))
+		copy(currentKey, kv.Key)
+		val := make([]byte, len(kv.Value))
+		copy(val, kv.Value)
+		values = append(values, val)
+	}
+	if currentKey != nil {
+		mw.Write(currentKey)
+		mw.WriteByte('\t')
+		for i, v := range values {
+			mw.Write(v)
+			if i < len(values)-1 {
+				mw.WriteByte(',')
+			}
+		}
+		mw.WriteByte('\n')
+	}
+	mw.Flush()
+	sf.Close()
+	mf.Close()
+	os.Remove(sortedFile)
+
+	return mergedPath, nil
+}
+
+func (w *worker) runReduce(task *mr.TaskAssignment) error {
+	hostname, _ := os.Hostname()
+	log.Printf("Reduce task %s starting for job %s on worker %s\n", task.TaskId, task.JobId, hostname)
+
+	tmpDir := filepath.Join(basePath, task.JobId)
+	os.MkdirAll(tmpDir, 0755)
+
+	mergedFile, err := w.shuffle(task, tmpDir)
+	if err != nil {
+		return err
+	}
+
+	_, reduceFunc, err := w.loadPlugin(task.JobBinary, task.JobId)
+	if err != nil {
+		return fmt.Errorf("failed to load plugin for reduce task: %v", err)
+	}
+	if reduceFunc == nil {
+		return fmt.Errorf("reduceFunc is nil in plugin")
+	}
+
+	mergedF, err := os.Open(mergedFile)
+	if err != nil {
+		return err
+	}
+	defer mergedF.Close()
+
+	resPath := filepath.Join(tmpDir, fmt.Sprintf("res-%s-%d", task.JobId, task.ReducerId))
+	resFile, err := os.Create(resPath)
+	if err != nil {
+		return err
+	}
+	defer resFile.Close()
+	resWriter := bufio.NewWriter(resFile)
+
+	bufScanner := bufio.NewScanner(mergedF)
+	for bufScanner.Scan() {
+		line := bufScanner.Bytes()
+		parts := bytes.SplitN(line, []byte("\t"), 2)
+		if len(parts) == 2 {
+			key := parts[0]
+			vals := bytes.Split(parts[1], []byte(","))
+			res := reduceFunc(key, vals)
+			resWriter.Write(key)
+			resWriter.WriteString(": ")
+			resWriter.Write(res)
+			resWriter.WriteByte('\n')
+		}
+	}
+	resWriter.Flush()
+
+	log.Printf("Reduce task %s finished, output at %s\n", task.TaskId, resPath)
+
+	return nil
+}
+
 func (w *worker) ihash(s []byte) uint32 {
 	h := uint32(0)
 	for i := range s {
@@ -390,6 +660,9 @@ func (w *worker) handleConnection(conn net.Conn) {
 
 		if task := wrapper.GetTaskAssign(); task != nil {
 			w.handleTask(handler, task)
+			return
+		} else if req := wrapper.GetFetchInter(); req != nil {
+			w.handleFetchIntermediate(handler, req)
 			return
 		}
 	}

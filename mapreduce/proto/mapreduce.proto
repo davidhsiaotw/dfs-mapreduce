@@ -54,6 +54,12 @@ message TaskReport {
     repeated uint64 reduce_data = 5;
 }
 
+message FetchIntermediateRequest {
+    string job_id = 1;
+    uint32 reducer_id = 2;
+    string task_id = 3;
+}
+
 message JobProgress {
     string job_id = 1;
     string phase = 2;
@@ -72,6 +78,7 @@ message MapReduceWrapper {
         Heartbeat heartbeat = 4;
         TaskAssignment task_assign = 5;
         TaskReport task_report = 6;
-        JobProgress job_progress = 7;
+        FetchIntermediateRequest fetch_inter = 7;
+        JobProgress job_progress = 8;
     }
 }

@@ -168,3 +168,15 @@ func (m *MessageHandler) SendTaskReport(jobId, taskId string, success bool, mess
 		},
 	})
 }
+
+func (m *MessageHandler) SendFetchIntermediateRequest(jobId string, reducerId uint32, taskId string) error {
+	return m.Send(&MapReduceWrapper{
+		Msg: &MapReduceWrapper_FetchInter{
+			FetchInter: &FetchIntermediateRequest{
+				JobId:     jobId,
+				ReducerId: reducerId,
+				TaskId:    taskId,
+			},
+		},
+	})
+}
