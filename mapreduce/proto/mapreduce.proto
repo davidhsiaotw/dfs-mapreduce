@@ -1,0 +1,27 @@
+syntax = "proto3";
+package mapreduce;
+option go_package = "./messages";
+
+message Response {
+    bool ok = 1;
+    string message = 2;
+}
+
+message WorkerInfo {
+    string id = 1;
+    string address = 2;
+    uint32 cpu_load = 3;
+    uint32 mem_load = 4;
+    uint32 active_tasks = 5;
+}
+
+message Heartbeat {
+    WorkerInfo worker = 1;
+}
+
+message MapReduceWrapper {
+    oneof msg {
+        Response response = 1;
+        Heartbeat heartbeat = 2;
+    }
+}
