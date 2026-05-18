@@ -634,6 +634,14 @@ func (w *worker) runReduce(task *mr.TaskAssignment) error {
 
 	log.Printf("Reduce task %s finished, output at %s\n", task.TaskId, resPath)
 
+	log.Printf("Uploading %s to DFS...\n", resPath)
+	cmd := exec.Command(w.dfsClientPath, w.dfsControllerAddr, "put", resPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to upload result to DFS: %v", err)
+	}
+
 	return nil
 }
 
