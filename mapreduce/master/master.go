@@ -43,6 +43,8 @@ type jobState struct {
 	mapTaskList      []MapTaskInfo
 
 	numReducers     uint16
+	reduceDataMutex sync.Mutex
+	reduceData      []map[string]uint64 // reducerIdx -> workerAddress -> total bytes
 }
 
 type master struct {
@@ -154,6 +156,7 @@ func (m *master) handleJobSubmission(msgHandler *mr.MessageHandler, req *mr.JobR
 		chunkNodes:  chunkNodes,
 		mapTaskList: mapTaskList,
 		numReducers: numReducers,
+		reduceData:  make([]map[string]uint64, numReducers),
 	}
 
 	m.jobsMutex.Lock()
@@ -196,6 +199,14 @@ func (m *master) runJob(job *jobState, clientHandler *mr.MessageHandler) {
 			job.mapTaskListMutex.Lock()
 			job.mapTaskList[taskIndex].NodeAddr = workerAddr
 			job.mapTaskListMutex.Unlock()
+			job.reduceDataMutex.Lock()
+			for rId, bytes := range reduceData {
+				if job.reduceData[rId] == nil {
+					job.reduceData[rId] = make(map[string]uint64)
+				}
+				job.reduceData[rId][workerAddr] += bytes
+			}
+			job.reduceDataMutex.Unlock()
 
 			c := atomic.AddUint32(&mapCompleted, 1)
 			sendProgress("MAP", c, uint32(len(job.mapTaskList)), false, false, "")
@@ -204,6 +215,29 @@ func (m *master) runJob(job *jobState, clientHandler *mr.MessageHandler) {
 	wg.Wait()
 
 	log.Printf("Job %s: MAP phase complete\n", jobId)
+
+	job.phase = mr.TaskType_REDUCE
+	log.Printf("Running job %s (REDUCE phase)\n", jobId)
+	sendProgress("REDUCE", 0, uint32(job.numReducers), false, false, "")
+
+	var reduceCompleted uint32
+	for i := range int(job.numReducers) {
+		wg.Add(1)
+		go func(reducerId uint32) {
+			defer wg.Done()
+			err := m.assignReduceTask(jobId, reducerId)
+			if err != nil {
+				log.Printf("skip a reduce task %d (%s): %v\n", reducerId, jobId, err)
+				sendProgress("MAP", atomic.AddUint32(&mapCompleted, 0), uint32(len(job.mapTaskList)), false, true, err.Error())
+				return
+			}
+			c := atomic.AddUint32(&reduceCompleted, 1)
+			sendProgress("REDUCE", c, uint32(job.numReducers), false, false, "")
+		}(uint32(i))
+	}
+	wg.Wait()
+
+	log.Printf("Job %s: REDUCE phase complete\n", jobId)
 
 	sendProgress("COMPLETED", 0, 0, true, false, "Job completed successfully")
 	m.jobsMutex.Lock()
@@ -322,6 +356,143 @@ func (m *master) assignMapTask(jobId string, taskIndex int) (string, []uint64, e
 					log.Printf("Task %s completed successfully\n", taskId)
 					conn.Close()
 					return ws.info.Address, report.ReduceData, nil
+				} else {
+					log.Printf("Task %s failed: %s. Retrying...\n", taskId, report.Message)
+					break
+				}
+			}
+		}
+		conn.Close()
+		retry += 1
+		log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// selectReduceWorker selects a worker for a reduce task based on maximum local data.
+func (m *master) selectReduceWorker(reduceId uint32, workerData map[string]uint64, delay bool) string {
+	m.workersMutex.RLock()
+	defer m.workersMutex.RUnlock()
+
+	if len(m.workers) == 0 {
+		return ""
+	}
+
+	var bestWorker string
+	var maxBytes uint64 = 0
+	found := false
+
+	for id, ws := range m.workers {
+		workerHost, _, err := net.SplitHostPort(ws.info.Address)
+		if err != nil {
+			workerHost = ws.info.Address
+		}
+
+		if ws.info.CpuLoad < cpuThreshold && ws.info.MemLoad < memThreshold {
+			var bytesOnWorker uint64 = 0
+			for addr, b := range workerData {
+				addrHost, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					addrHost = addr
+				}
+				if addrHost == workerHost {
+					log.Printf("worker at %s has %d bytes for reduce %d\n", addr, b, reduceId)
+					bytesOnWorker += b
+				}
+			}
+
+			if !found || bytesOnWorker > maxBytes {
+				maxBytes = bytesOnWorker
+				bestWorker = id
+				found = true
+			}
+		}
+	}
+
+	if found {
+		return bestWorker
+	}
+
+	if delay {
+		return ""
+	}
+
+	var minTasks uint32 = 0xffffffff
+	for id, ws := range m.workers {
+		if ws.info.CpuLoad < cpuThreshold && ws.info.MemLoad < memThreshold {
+			if ws.info.ActiveTasks < minTasks {
+				minTasks = ws.info.ActiveTasks
+				bestWorker = id
+			}
+		}
+	}
+
+	return bestWorker
+}
+
+// assignReduceTask dispatches a reduce task to a node/worker. After trying five times, the reduce is skipped.
+func (m *master) assignReduceTask(jobId string, reducerId uint32) error {
+	m.jobsMutex.RLock()
+	job := m.jobs[jobId]
+	m.jobsMutex.RUnlock()
+
+	mapTaskInfo := make(map[string]string)
+	for _, taskInfo := range job.mapTaskList {
+		mapTaskInfo[fmt.Sprintf("%s-%d", taskInfo.FileName, taskInfo.ChunkId)] = taskInfo.NodeAddr
+	}
+
+	job.reduceDataMutex.Lock()
+	workerData := job.reduceData[reducerId]
+	job.reduceDataMutex.Unlock()
+
+	var retry uint8 = 0
+	const limit uint8 = 5
+	for {
+		if retry >= limit {
+			return fmt.Errorf("failed to assign map task")
+		}
+
+		workerId := m.selectReduceWorker(reducerId, workerData, retry <= (limit>>1))
+		if workerId == "" {
+			time.Sleep(5 * time.Second)
+			retry += 1
+			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+			continue
+		}
+
+		m.workersMutex.RLock()
+		ws := m.workers[workerId]
+		m.workersMutex.RUnlock()
+
+		conn, err := net.Dial("tcp", ws.info.Address)
+		if err != nil {
+			log.Printf("failed to connect to worker %s: %v\n", workerId, err)
+			retry += 1
+			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+			continue
+		}
+
+		handler := mr.NewMessageHandler(conn)
+		taskId := fmt.Sprintf("reduce-%d", reducerId)
+		log.Printf("assign reduce task %s to worker %s", taskId, workerId)
+		err = handler.SendTaskAssignment(jobId, taskId, mr.TaskType_REDUCE, "", 0, job.request.JobBinary, uint32(job.numReducers), reducerId, mapTaskInfo)
+		if err != nil {
+			conn.Close()
+			retry += 1
+			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+			continue
+		}
+
+		for {
+			wrapper, err := handler.Receive()
+			if err != nil {
+				break
+			}
+			if report := wrapper.GetTaskReport(); report != nil {
+				if report.Success {
+					log.Printf("Task %s completed successfully\n", taskId)
+					conn.Close()
+					return nil
 				} else {
 					log.Printf("Task %s failed: %s. Retrying...\n", taskId, report.Message)
 					break
