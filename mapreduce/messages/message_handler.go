@@ -105,6 +105,22 @@ func (m *MessageHandler) SendJobResponse(ok bool, msg, jobId string) error {
 	})
 }
 
+func (m *MessageHandler) SendJobProgress(jobId, phase string, completed, total uint32, isComplete, isError bool, msg string) error {
+	return m.Send(&MapReduceWrapper{
+		Msg: &MapReduceWrapper_JobProgress{
+			JobProgress: &JobProgress{
+				JobId:          jobId,
+				Phase:          phase,
+				CompletedTasks: completed,
+				TotalTasks:     total,
+				IsComplete:     isComplete,
+				IsError:        isError,
+				Message:        msg,
+			},
+		},
+	})
+}
+
 func (m *MessageHandler) SendHeartbeat(id, address string, cpu uint32, mem uint32, active uint32) error {
 	return m.Send(&MapReduceWrapper{
 		Msg: &MapReduceWrapper_Heartbeat{
@@ -116,6 +132,38 @@ func (m *MessageHandler) SendHeartbeat(id, address string, cpu uint32, mem uint3
 					MemLoad:     mem,
 					ActiveTasks: active,
 				},
+			},
+		},
+	})
+}
+
+func (m *MessageHandler) SendTaskAssignment(jobId, taskId string, t TaskType, inputFile string, chunkId uint64, jobBinary []byte, numReducers uint32, reducerId uint32, mapTaskInfo map[string]string) error {
+	return m.Send(&MapReduceWrapper{
+		Msg: &MapReduceWrapper_TaskAssign{
+			TaskAssign: &TaskAssignment{
+				JobId:           jobId,
+				TaskId:          taskId,
+				Type:            t,
+				InputFile:       inputFile,
+				ChunkId:         chunkId,
+				JobBinary:       jobBinary,
+				NumReducers:     numReducers,
+				ReducerId:       reducerId,
+				MapTaskInfo:      mapTaskInfo,
+			},
+		},
+	})
+}
+
+func (m *MessageHandler) SendTaskReport(jobId, taskId string, success bool, message string, reduceData []uint64) error {
+	return m.Send(&MapReduceWrapper{
+		Msg: &MapReduceWrapper_TaskReport{
+			TaskReport: &TaskReport{
+				JobId:      jobId,
+				TaskId:     taskId,
+				Success:    success,
+				Message:    message,
+				ReduceData: reduceData,
 			},
 		},
 	})

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	mr "mapreduce/messages"
+	"math"
 	"net"
 	"os"
 	"sync"
@@ -13,9 +14,23 @@ import (
 	"time"
 )
 
+const lbFactor = 0.95 // either 0.95 or 1.75
+const numNodes = 21
+const numReducersPerNode = 5
+const maxNumReducers = lbFactor * numNodes * numReducersPerNode
+const numChunksPerReducers = 5
+const cpuThreshold = 80
+const memThreshold = 80
+
 type workerStatus struct {
 	info          *mr.WorkerInfo
 	lastHeartbeat time.Time
+}
+
+type MapTaskInfo struct {
+	FileName string
+	ChunkId  uint64
+	NodeAddr string
 }
 
 type jobState struct {
@@ -23,6 +38,11 @@ type jobState struct {
 	request     *mr.JobRequest
 	phase       mr.TaskType
 	chunkNodes  map[string][][]string // fileName -> chunkId -> node addresses
+
+	mapTaskListMutex sync.Mutex
+	mapTaskList      []MapTaskInfo
+
+	numReducers     uint16
 }
 
 type master struct {
@@ -111,22 +131,29 @@ func (m *master) handleJobSubmission(msgHandler *mr.MessageHandler, req *mr.JobR
 	log.Printf("Received job submission: %s, inputs: %v\n", jobId, req.InputFiles)
 
 	chunkNodes := make(map[string][][]string)
+	var mapTaskList []MapTaskInfo
 
 	for _, inputFile := range req.InputFiles {
-		fileChunkNodes, _, err := m.getChunkInfoFromDFS(inputFile)
+		fileChunkNodes, numChunks, err := m.getChunkInfoFromDFS(inputFile)
 		if err != nil {
 			log.Printf("Failed to get chunk info for %s: %v\n", inputFile, err)
 			msgHandler.SendJobResponse(false, "Failed to get chunk info from DFS for "+inputFile+": "+err.Error(), "")
 			return
 		}
 		chunkNodes[inputFile] = fileChunkNodes
+		for i := range numChunks {
+			mapTaskList = append(mapTaskList, MapTaskInfo{FileName: inputFile, ChunkId: uint64(i)})
+		}
 	}
 
+	numReducers := uint16(math.Min(float64(len(mapTaskList))/float64(numChunksPerReducers), math.Round(maxNumReducers)))
 	job := &jobState{
 		id:          jobId,
 		request:     req,
 		phase:       mr.TaskType_MAP,
 		chunkNodes:  chunkNodes,
+		mapTaskList: mapTaskList,
+		numReducers: numReducers,
 	}
 
 	m.jobsMutex.Lock()
@@ -134,6 +161,178 @@ func (m *master) handleJobSubmission(msgHandler *mr.MessageHandler, req *mr.JobR
 	m.jobsMutex.Unlock()
 
 	msgHandler.SendJobResponse(true, "Job accepted", jobId)
+
+	go m.runJob(job, msgHandler)
+}
+
+func (m *master) runJob(job *jobState, clientHandler *mr.MessageHandler) {
+	jobId := job.id
+
+	var clientMu sync.Mutex
+	sendProgress := func(phase string, completed, total uint32, isComplete, isError bool, msg string) {
+		if clientHandler == nil {
+			return
+		}
+		clientMu.Lock()
+		defer clientMu.Unlock()
+		clientHandler.SendJobProgress(jobId, phase, completed, total, isComplete, isError, msg)
+	}
+
+	log.Printf("Running job %s (MAP phase)\n", jobId)
+	sendProgress("MAP", 0, uint32(len(job.mapTaskList)), false, false, "")
+
+	var wg sync.WaitGroup
+	var mapCompleted uint32
+	for i := 0; i < len(job.mapTaskList); i++ {
+		wg.Add(1)
+		go func(taskIndex int) {
+			defer wg.Done()
+			workerAddr, reduceData, err := m.assignMapTask(jobId, taskIndex)
+			if reduceData == nil || err != nil {
+				log.Printf("skip a map task %d (%s): %v\n", taskIndex, jobId, err)
+				sendProgress("MAP", atomic.AddUint32(&mapCompleted, 0), uint32(len(job.mapTaskList)), false, true, err.Error())
+				return
+			}
+			job.mapTaskListMutex.Lock()
+			job.mapTaskList[taskIndex].NodeAddr = workerAddr
+			job.mapTaskListMutex.Unlock()
+
+			c := atomic.AddUint32(&mapCompleted, 1)
+			sendProgress("MAP", c, uint32(len(job.mapTaskList)), false, false, "")
+		}(i)
+	}
+	wg.Wait()
+
+	log.Printf("Job %s: MAP phase complete\n", jobId)
+
+	sendProgress("COMPLETED", 0, 0, true, false, "Job completed successfully")
+	m.jobsMutex.Lock()
+	delete(m.jobs, jobId)
+	m.jobsMutex.Unlock()
+}
+
+// selectWorker selects the most available node/worker from nodes, that has available resources and the least active tasks. If there is no chosen node/worker, it selects the most available worker from master's worker list.
+func (m *master) selectWorker(nodes []string, delay bool) string {
+	m.workersMutex.RLock()
+	defer m.workersMutex.RUnlock()
+
+	if len(m.workers) == 0 {
+		return ""
+	}
+
+	var bestWorker string
+	minTasks := uint32(0xffffffff)
+
+	for _, addr := range nodes {
+		nodeHost, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			nodeHost = addr
+		}
+		for id, ws := range m.workers {
+			workerHost, _, err := net.SplitHostPort(ws.info.Address)
+			if err != nil {
+				workerHost = ws.info.Address
+			}
+			if nodeHost == workerHost {
+				// log.Printf("worker %s resource stats: %d%% cpu,%d%% mem, %d active tasks", wsHost, ws.info.CpuLoad, ws.info.MemLoad, ws.info.ActiveTasks)
+				if ws.info.CpuLoad < cpuThreshold && ws.info.MemLoad < memThreshold {
+					if ws.info.ActiveTasks < minTasks {
+						minTasks = ws.info.ActiveTasks
+						bestWorker = id
+					}
+				}
+			}
+		}
+	}
+
+	if bestWorker != "" {
+		return bestWorker
+	}
+
+	if delay && nodes != nil {
+		return ""
+	}
+
+	minTasks = uint32(0xffffffff)
+	for id, ws := range m.workers {
+		if ws.info.CpuLoad < cpuThreshold && ws.info.MemLoad < memThreshold {
+			if ws.info.ActiveTasks < minTasks {
+				minTasks = ws.info.ActiveTasks
+				bestWorker = id
+			}
+		}
+	}
+
+	return bestWorker
+}
+
+// assignMapTask dispatches a map task to a node/worker. After trying five times, the map task is skipped.
+func (m *master) assignMapTask(jobId string, taskIndex int) (string, []uint64, error) {
+	m.jobsMutex.RLock()
+	job := m.jobs[jobId]
+	taskInfo := job.mapTaskList[taskIndex]
+	m.jobsMutex.RUnlock()
+
+	var retry uint8 = 0
+	const limit uint8 = 5
+	for {
+		if retry >= limit {
+			return "", nil, fmt.Errorf("failed to assign map task")
+		}
+
+		nodes := job.chunkNodes[taskInfo.FileName][taskInfo.ChunkId]
+		workerId := m.selectWorker(nodes, retry <= (limit>>1))
+		if workerId == "" {
+			time.Sleep(5 * time.Second)
+			retry += 1
+			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+			continue
+		}
+
+		m.workersMutex.RLock()
+		ws := m.workers[workerId]
+		m.workersMutex.RUnlock()
+
+		conn, err := net.Dial("tcp", ws.info.Address)
+		if err != nil {
+			log.Printf("failed to connect to worker %s: %v\n", workerId, err)
+			retry += 1
+			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+			continue
+		}
+
+		handler := mr.NewMessageHandler(conn)
+		taskId := fmt.Sprintf("%s-%d", taskInfo.FileName, taskInfo.ChunkId)
+		log.Printf("assign map task %s to worker %s", taskId, workerId)
+		err = handler.SendTaskAssignment(jobId, taskId, mr.TaskType_MAP, taskInfo.FileName, taskInfo.ChunkId, job.request.JobBinary, uint32(job.numReducers), 0, nil)
+		if err != nil {
+			conn.Close()
+			retry += 1
+			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+			continue
+		}
+
+		for {
+			wrapper, err := handler.Receive()
+			if err != nil {
+				break
+			}
+			if report := wrapper.GetTaskReport(); report != nil {
+				if report.Success {
+					log.Printf("Task %s completed successfully\n", taskId)
+					conn.Close()
+					return ws.info.Address, report.ReduceData, nil
+				} else {
+					log.Printf("Task %s failed: %s. Retrying...\n", taskId, report.Message)
+					break
+				}
+			}
+		}
+		conn.Close()
+		retry += 1
+		log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
+		time.Sleep(5 * time.Second)
+	}
 }
 
 func (m *master) handleConnection(conn net.Conn) {

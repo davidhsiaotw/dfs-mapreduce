@@ -34,11 +34,44 @@ enum TaskType {
     REDUCE = 1;
 }
 
+message TaskAssignment {
+    string job_id = 1;
+    string task_id = 2;
+    TaskType type = 3;
+    string input_file = 4;
+    uint64 chunk_id = 5;
+    bytes job_binary = 6;
+    uint32 num_reducers = 7;
+    uint32 reducer_id = 8; // For REDUCE tasks
+    map<string, string> map_task_info = 9; // For REDUCE tasks
+}
+
+message TaskReport {
+    string job_id = 1;
+    string task_id = 2;
+    bool success = 3;
+    string message = 4;
+    repeated uint64 reduce_data = 5;
+}
+
+message JobProgress {
+    string job_id = 1;
+    string phase = 2;
+    uint32 completed_tasks = 3;
+    uint32 total_tasks = 4;
+    bool is_complete = 5;
+    bool is_error = 6;
+    string message = 7;
+}
+
 message MapReduceWrapper {
     oneof msg {
         Response response = 1;
         JobRequest job_req = 2;
         JobResponse job_resp = 3;
         Heartbeat heartbeat = 4;
+        TaskAssignment task_assign = 5;
+        TaskReport task_report = 6;
+        JobProgress job_progress = 7;
     }
 }
