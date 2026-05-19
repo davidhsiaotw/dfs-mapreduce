@@ -83,12 +83,13 @@ func (m *MessageHandler) SendResponse(ok bool, msg string) error {
 	})
 }
 
-func (m *MessageHandler) SendJobRequest(inputFiles []string, jobBinary []byte) error {
+func (m *MessageHandler) SendJobRequest(inputFiles []string, jobBinary []byte, numReducers uint32) error {
 	return m.Send(&MapReduceWrapper{
 		Msg: &MapReduceWrapper_JobReq{
 			JobReq: &JobRequest{
 				InputFiles:  inputFiles,
 				JobBinary:   jobBinary,
+				NumReducers: numReducers,
 			},
 		},
 	})

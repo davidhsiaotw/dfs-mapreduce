@@ -6,10 +6,11 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
-func submitJob(masterAddr string, inputFiles []string, pluginPath string) {
+func submitJob(masterAddr string, inputFiles []string, pluginPath string, numReducers uint32) {
 	conn, err := net.Dial("tcp", masterAddr)
 	if err != nil {
 		log.Fatalf("Failed to connect to Master: %v\n", err)
@@ -23,7 +24,7 @@ func submitJob(masterAddr string, inputFiles []string, pluginPath string) {
 		log.Fatalf("Failed to read plugin file: %v\n", err)
 	}
 
-	err = handler.SendJobRequest(inputFiles, jobBinary)
+	err = handler.SendJobRequest(inputFiles, jobBinary, numReducers)
 	if err != nil {
 		log.Fatalf("Failed to send job request: %v\n", err)
 	}
@@ -76,16 +77,22 @@ func submitJob(masterAddr string, inputFiles []string, pluginPath string) {
 }
 
 func main() {
-	if len(os.Args) < 4 {
-		fmt.Printf("Usage: %s <master_addr> <input_file1,input_file2,...> <plugin_path>\n", os.Args[0])
+	if len(os.Args) < 5 {
+		fmt.Printf("Usage: %s <master_addr> <input_file1,input_file2,...> <plugin_path> <num-reducers>\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	masterAddr := os.Args[1]
 	inputFiles := strings.Split(os.Args[2], ",")
 	pluginPath := os.Args[3]
+	numReducersStr := os.Args[4]
+
+	numReducers, err := strconv.ParseUint(numReducersStr, 10, 32)
+	if err != nil {
+		log.Fatalf("Invalid number of reducers: %v\n", err)
+	}
 
 	fmt.Printf("input files: %v\n", inputFiles)
 
-	submitJob(masterAddr, inputFiles, pluginPath)
+	submitJob(masterAddr, inputFiles, pluginPath, uint32(numReducers))
 }

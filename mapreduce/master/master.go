@@ -34,15 +34,15 @@ type MapTaskInfo struct {
 }
 
 type jobState struct {
-	id          string
-	request     *mr.JobRequest
-	phase       mr.TaskType
-	chunkNodes  map[string][][]string // fileName -> chunkId -> node addresses
+	id         string
+	request    *mr.JobRequest
+	phase      mr.TaskType
+	chunkNodes map[string][][]string // fileName -> chunkId -> node addresses
 
 	mapTaskListMutex sync.Mutex
 	mapTaskList      []MapTaskInfo
 
-	numReducers     uint16
+	numReducers     uint32
 	reduceDataMutex sync.Mutex
 	reduceData      []map[string]uint64 // reducerIdx -> workerAddress -> total bytes
 }
@@ -148,7 +148,14 @@ func (m *master) handleJobSubmission(msgHandler *mr.MessageHandler, req *mr.JobR
 		}
 	}
 
-	numReducers := uint16(math.Min(float64(len(mapTaskList))/float64(numChunksPerReducers), math.Round(maxNumReducers)))
+	numReducers := req.NumReducers
+	if numReducers == 0 {
+		numReducers = uint32(math.Max(
+			1, math.Min(
+				math.Ceil(float64(len(mapTaskList))/float64(numChunksPerReducers)), math.Round(maxNumReducers)),
+		),
+		)
+	}
 	job := &jobState{
 		id:          jobId,
 		request:     req,

@@ -10,6 +10,7 @@ message Response {
 message JobRequest {
     repeated string input_files = 1;
     bytes job_binary = 2; // .so or executable
+    uint32 num_reducers = 3;
 }
 
 message JobResponse {
