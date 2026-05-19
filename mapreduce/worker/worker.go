@@ -184,6 +184,8 @@ func (w *worker) runMap(task *mr.TaskAssignment) ([]uint64, error) {
 	}
 
 	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 1<<12)
+	scanner.Buffer(buf, 16<<20)
 	tmpDir := filepath.Join(basePath, task.JobId)
 	os.MkdirAll(tmpDir, 0755)
 
@@ -210,6 +212,10 @@ func (w *worker) runMap(task *mr.TaskAssignment) ([]uint64, error) {
 				spillIdx++
 			}
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error scanning input file for map task: %v\n", err)
 	}
 
 	if len(buffer) > 0 {
@@ -617,6 +623,8 @@ func (w *worker) runReduce(task *mr.TaskAssignment) error {
 	resWriter := bufio.NewWriter(resFile)
 
 	bufScanner := bufio.NewScanner(mergedF)
+	bufR := make([]byte, 16<<20)
+	bufScanner.Buffer(bufR, 16<<20)
 	for bufScanner.Scan() {
 		line := bufScanner.Bytes()
 		parts := bytes.SplitN(line, []byte("\t"), 2)
@@ -629,6 +637,9 @@ func (w *worker) runReduce(task *mr.TaskAssignment) error {
 			resWriter.Write(res)
 			resWriter.WriteByte('\n')
 		}
+	}
+	if err := bufScanner.Err(); err != nil {
+		log.Printf("Error scanning merged file for reduce task: %v\n", err)
 	}
 	resWriter.Flush()
 

@@ -6,7 +6,10 @@ import (
 	"container/heap"
 	"io"
 	"os"
+	"path/filepath"
 )
+
+const maxTokenSize = 16 << 20 // 16MiB
 
 type KVScanner struct {
 	scanner *bufio.Scanner
@@ -15,7 +18,10 @@ type KVScanner struct {
 }
 
 func NewKVScanner(r io.Reader) *KVScanner {
-	return &KVScanner{scanner: bufio.NewScanner(r)}
+	s := bufio.NewScanner(r)
+	buf := make([]byte, 4096)
+	s.Buffer(buf, maxTokenSize)
+	return &KVScanner{scanner: s}
 }
 
 func (s *KVScanner) Next() bool {
@@ -36,6 +42,10 @@ func (s *KVScanner) Next() bool {
 	return false
 }
 
+func (s *KVScanner) Err() error {
+	return s.scanner.Err()
+}
+
 type ScannerHeap []*KVScanner
 
 func (h ScannerHeap) Len() int           { return len(h) }
@@ -52,7 +62,7 @@ func (h *ScannerHeap) Pop() any {
 	return x
 }
 
-func ExternalSort(inputFiles []string, outputFile string) error {
+func externalSortBatch(inputFiles []string, outputFile string) error {
 	h := &ScannerHeap{}
 	heap.Init(h)
 
@@ -95,4 +105,36 @@ func ExternalSort(inputFiles []string, outputFile string) error {
 	}
 
 	return nil
+}
+
+func ExternalSort(inputFiles []string, outputFile string) error {
+	const batchSize = 100
+	if len(inputFiles) <= batchSize {
+		return externalSortBatch(inputFiles, outputFile)
+	}
+
+	var tempFiles []string
+	for i := 0; i < len(inputFiles); i += batchSize {
+		end := min(i + batchSize, len(inputFiles))
+		batch := inputFiles[i:end]
+		
+		tempF, err := os.CreateTemp(filepath.Dir(outputFile), filepath.Base(outputFile)+".tmp.*")
+		if err != nil {
+			return err
+		}
+		tempFile := tempF.Name()
+		tempF.Close()
+		
+		err = externalSortBatch(batch, tempFile)
+		if err != nil {
+			return err
+		}
+		tempFiles = append(tempFiles, tempFile)
+	}
+
+	err := ExternalSort(tempFiles, outputFile)
+	for _, f := range tempFiles {
+		os.Remove(f)
+	}
+	return err
 }
