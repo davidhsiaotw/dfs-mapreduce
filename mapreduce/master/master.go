@@ -7,6 +7,7 @@ import (
 	"log"
 	mr "mapreduce/messages"
 	"math"
+	"math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -78,11 +79,11 @@ func (m *master) handleWorkerHeartbeat(hb *mr.Heartbeat) {
 
 func (m *master) monitorWorkers() {
 	for {
-		time.Sleep(5 * time.Second)
+		time.Sleep(2 * time.Second)
 		m.workersMutex.Lock()
 		now := time.Now()
 		for id, ws := range m.workers {
-			if now.Sub(ws.lastHeartbeat) > 30*time.Second {
+			if now.Sub(ws.lastHeartbeat) > 15*time.Second {
 				log.Printf("Worker %s is DEAD\n", id)
 				delete(m.workers, id)
 			}
@@ -197,6 +198,9 @@ func (m *master) runJob(job *jobState, clientHandler *mr.MessageHandler) {
 		wg.Add(1)
 		go func(taskIndex int) {
 			defer wg.Done()
+			if taskIndex > 0 {
+				time.Sleep(time.Duration(rand.UintN(5)+2) * time.Second)
+			}
 			workerAddr, reduceData, err := m.assignMapTask(jobId, taskIndex)
 			if reduceData == nil || err != nil {
 				log.Printf("skip a map task %d (%s): %v\n", taskIndex, jobId, err)
@@ -232,6 +236,9 @@ func (m *master) runJob(job *jobState, clientHandler *mr.MessageHandler) {
 		wg.Add(1)
 		go func(reducerId uint32) {
 			defer wg.Done()
+			if reducerId > 0 {
+				time.Sleep(time.Duration(rand.UintN(5)+2) * time.Second)
+			}
 			err := m.assignReduceTask(jobId, reducerId)
 			if err != nil {
 				log.Printf("skip a reduce task %d (%s): %v\n", reducerId, jobId, err)
@@ -324,7 +331,7 @@ func (m *master) assignMapTask(jobId string, taskIndex int) (string, []uint64, e
 		nodes := job.chunkNodes[taskInfo.FileName][taskInfo.ChunkId]
 		workerId := m.selectWorker(nodes, retry <= (limit>>1))
 		if workerId == "" {
-			time.Sleep(5 * time.Second)
+			time.Sleep(3 * time.Second)
 			retry += 1
 			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
 			continue
@@ -372,7 +379,7 @@ func (m *master) assignMapTask(jobId string, taskIndex int) (string, []uint64, e
 		conn.Close()
 		retry += 1
 		log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
-		time.Sleep(5 * time.Second)
+		time.Sleep(3 * time.Second)
 	}
 }
 
@@ -461,7 +468,7 @@ func (m *master) assignReduceTask(jobId string, reducerId uint32) error {
 
 		workerId := m.selectReduceWorker(reducerId, workerData, retry <= (limit>>1))
 		if workerId == "" {
-			time.Sleep(5 * time.Second)
+			time.Sleep(3 * time.Second)
 			retry += 1
 			log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
 			continue
@@ -509,7 +516,7 @@ func (m *master) assignReduceTask(jobId string, reducerId uint32) error {
 		conn.Close()
 		retry += 1
 		log.Printf("retrying to assign a map task (%d/%d)", retry, limit)
-		time.Sleep(5 * time.Second)
+		time.Sleep(3 * time.Second)
 	}
 }
 
