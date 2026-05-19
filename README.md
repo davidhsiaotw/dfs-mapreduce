@@ -119,3 +119,30 @@ remove all mapreduce workspace directories
 ```
 ./cluster.sh mr clean
 ```
+
+## Q&A
+How many extra days did you use for the project? \
+0 day
+
+Given the same goals, how would you complete the project differently if you didn’t have any restrictions imposed by the instructor? This could involve using a particular library, programming language, etc. Be sure to provide sufficient detail to justify your response. \
+I would leverage existing remote procedure call (RPC) frameworks like gRPC rather than building custom TCP socket communication and message framing from scratch. gRPC handles serialization (via Protocol Buffers), multiplexing, and connection management out of the box, which would significantly reduce the complexity and edge cases related to network transmission failures and parsing.
+
+Let’s imagine that your next project was to improve and extend P2. What are the features/functionality you would add, use cases you would support, etc? Are there any weaknesses in your current implementation that you would like to improve upon? This should include at least three areas you would improve/extend. \
+1\. load balance\
+&emsp;Master waits for 2-6 seconds before assigning a task to make load balance decision based on updated resources, but it can still use same snapshot of resources if waiting time is the same \
+&emsp;Master should have updated workers' statistics on memory for load balance, then merge with those in heartbeat \
+2\. fault tolerance \
+&emsp;A task is skipped if failed, but master is supposed to reassign it \
+3\. separate load balance into a resource manager \
+4\. log \
+&emsp;Import a log library to provide better log format and prevent commenting code
+
+Give a rough estimate of how long you spent completing this assignment. Additionally, what part of the assignment took the most time? \
+Adding a feature to retrieve a file chunk and a WAL to DFS takes about three working days. However, WAL functionality is not well tested, and DFS is still unstable for continous operation.
+Building mapreduce takes seven working days.
+
+What did you learn from completing this project? Is there anything you would change about the project? \
+Pass as much information as possible, so time to repeatedly refactor and implement decreases
+
+If you worked as a group, how did you divide the workload? What went well with your team, and what did not go well?
+As a group of two, everyone should contribute to design and utiliy implementation. Then, divide client, master, and worker wordload into map and reduce.
