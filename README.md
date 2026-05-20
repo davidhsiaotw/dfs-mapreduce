@@ -10,9 +10,10 @@ controller and master runs on orion11
 <center>
   <img src="mapreduce.png" alt="mapreduce architecture" width="50%">
 </center>
+
 dfs base directory = /bigdata/students/whsiao5/mydfs/ \
 chunk path: filename/chunk_<chunk_id> \
-checksum path: filename/chunk_<chunk_id>.chksum \
+checksum path: filename/chunk_<chunk_id>.chksum
 
 mapreduce base directory = /bigdata/students/whsiao5/mr/ \
 job directory = <job_id> \
